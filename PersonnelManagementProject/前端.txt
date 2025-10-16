@@ -1,0 +1,627 @@
+classdef app1 < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure          matlab.ui.Figure
+        GridLayout        matlab.ui.container.GridLayout
+        LeftPanel         matlab.ui.container.Panel
+        Button_3          matlab.ui.control.Button
+        Image             matlab.ui.control.Image
+        Button_2          matlab.ui.control.Button
+        DatePicker        matlab.ui.control.DatePicker
+        Label_5           matlab.ui.control.Label
+        EditField_4       matlab.ui.control.EditField
+        Label_4           matlab.ui.control.Label
+        EditField_3       matlab.ui.control.EditField
+        Label_3           matlab.ui.control.Label
+        EditField         matlab.ui.control.EditField
+        Label             matlab.ui.control.Label
+        RightPanel        matlab.ui.container.Panel
+        PDFButton         matlab.ui.control.Button
+        EditField_5       matlab.ui.control.EditField
+        EditField_5Label  matlab.ui.control.Label
+        Button            matlab.ui.control.Button
+        TextArea          matlab.ui.control.TextArea
+        Label_6           matlab.ui.control.Label
+        UITable           matlab.ui.control.Table
+    end
+
+    % Properties that correspond to apps with auto-reflow
+    properties (Access = private)
+        onePanelWidth = 576;
+    end
+
+    
+    properties (Access = private)
+        tcpObj;    % tcpclient 对象
+        commTimer; % 定时器对象
+        PendingCmd uint8 = []; % 待发指令
+        SELECT_Mark; % 查找标志 0：非查找；1：单次查找；2：全部查找
+        PersonImageBytes   uint8    % 存储头像的二进制数据
+        PersonImageName    char     % 保存文件名
+    end
+    
+    methods (Access = private)
+        function tcpLoop(app)
+            % === 1) 只在有字节可读时才调用 read ===
+            if app.tcpObj.NumBytesAvailable > 0
+                n = app.tcpObj.NumBytesAvailable;
+                data = read(app.tcpObj, n, "uint8");   % n 肯定 > 0
+                switch app.SELECT_Mark
+                    %全部查询情况
+                    case 2
+                        if ~isempty(data)
+                            msg = native2unicode(data, "UTF-8");
+                            % 把消息显示到 UI
+                            %app.TextArea.Value = [app.TextArea.Value; {msg}];
+                            app.TextArea.Value = [app.TextArea.Value; {msg}];  % 累加显示
+                            parseAndUpdateTable(app, msg);%更新图标
+                             
+                            app.SELECT_Mark = 0;%复位查询标志位
+                        end
+                    %单次查询的情况
+                    case 1
+                        if ~isempty(data)
+                            % === 1. 找到 header 结束位置 ===
+                            headerEndStr = sprintf('END_HEADER\n');   % 注意这里用单引号
+                            headerEndBytes = uint8(headerEndStr);     % 现在 headerEndStr 是 char，能正常转
+                    
+                            % 在二进制数据中查找头部结束标志
+                            headerEndPos = strfind(data, headerEndBytes);
+                            if ~isempty(headerEndPos)
+                                % --- 提取 header 部分 ---
+                                headerBytes = data(1 : headerEndPos + numel(headerEndBytes) - 1);
+                                headerText = native2unicode(headerBytes, "UTF-8"); % headerBytes = data(1:headerEndPos+numel(headerEndBytes)-1)
+                                headerLines = strsplit(strtrim(headerText), newline);
+
+                                %disp(headerText);
+                    
+                                %--- 解析 header --——
+                                
+                                for i = 1:numel(headerLines)
+                                    line = strtrim(headerLines{i});
+                                    if isempty(line), continue; end
+                                    eqPos = strfind(line, '=');
+                                    if isempty(eqPos), continue; end
+                                    key = strtrim(line(1:eqPos(1)-1));
+                                    val = strtrim(line(eqPos(1)+1:end));
+                                    header.(key) = val;
+                                end
+                                %disp(header);
+                    
+                                % --- 提取图片数据 ---
+                                fileSize     = str2double(header.fileSize);
+                                imgDataStart = headerEndPos + numel(headerEndBytes);
+                                imgData      = data(imgDataStart : end);
+                    
+                                % === 2. 确认是否收齐图片数据 ===
+                                if numel(imgData) < fileSize
+                                    fprintf("图片数据未完整接收 (%d/%d)\n", numel(imgData), fileSize);
+                                    return; % 先退出，等下次数据到齐
+                                else
+                                    imgData = imgData(1:fileSize); % 截取刚好 fileSize
+                                end
+                    
+                                % === 3. 显示人员信息 ===
+                                if isfield(header, "name"),     app.EditField.Value   = header.name;     end
+                                if ~isempty(header.birthday)
+                                    app.DatePicker.Value = datetime(header.birthday,'InputFormat','yyyy-MM');
+                                end
+                                if isfield(header, "phone"),    app.EditField_3.Value = header.phone;    end
+                                if isfield(header, "address"),  app.EditField_4.Value = header.address;  end
+                    
+                                %Debug图片
+                                % fprintf("imgData 前16字节: %s\n", join(string(dec2hex(imgData(1:16))), " "));
+                                % fprintf('%02X ', imgData(end-15:end));
+                                % fprintf('\n');
+                                % === 4. 显示图片 ===
+                                if fileSize > 0
+                                    try
+                                        tmpFile = tempname + ".png";   % 更推荐这种写法，返回 string
+                                        fid = fopen(tmpFile, "wb");    % 二进制写入模式
+                                        if fid == -1
+                                            error("无法创建临时文件: %s", tmpFile);
+                                        end
+                                        
+                                        fwrite(fid, imgData, "uint8");
+                                        fclose(fid);
+                                        
+                                        img = imread(tmpFile);
+                                        delete(tmpFile);
+                                        
+                                        % 在 App Designer 里显示
+                                        app.Image.ImageSource = img;   % 如果 app.Image 是 uiimage
+                                    catch e
+                                        fprintf("图片解析错误：%s", e.message);
+                                    end
+                    
+                                    if ~isempty(img)
+                                        app.Image.ImageSource = img;
+                                    else
+                                        app.Image.ImageSource = ones(100,100,3);  % 100x100 白图
+                                    end
+                                end
+                    
+                                % === 5. 状态提示 ===
+                                app.TextArea.Value = "查询到一条信息";
+                            else
+                                disp("还未接收到完整 header，继续等待...");
+                            end
+                        end
+                        app.SELECT_Mark = 0;
+
+                    %其他的返回信息
+                    case 0
+                        if ~isempty(data)
+                            msg = native2unicode(data, "UTF-8");
+                            % 把消息显示到 UI
+                            app.TextArea.Value = msg;
+                             
+                            app.SELECT_Mark = 0;%复位查询标志位
+                        end
+
+                end
+            end
+    
+            % === 2) 发送 ===
+            if ~isempty(app.PendingCmd)
+                try
+                    % 直接写入 TCP
+                    write(app.tcpObj, app.PendingCmd, "uint8");
+        
+                    % 调试输出（可选）
+                    fprintf("已发送数据包，共 %d 字节\n", numel(app.PendingCmd));
+        
+                    % 清空待发缓冲
+                    app.PendingCmd = uint8([]);   % uint8 用 []
+                catch ME
+                    app.TextArea.Value = sprintf("发送数据时出错: %s", ME.message);
+                end
+            end
+        end
+
+        function parseAndUpdateTable(app, msg)
+            try
+                % 移除首尾的空白字符
+                msg = strtrim(msg);
+                
+                % 检查是否为空结果
+                if isempty(msg) || contains(msg, 'Query returned no result')
+                    % 创建空的表格
+                    emptyData = cell2table(cell(0, 4), 'VariableNames', ...
+                        {'姓名', '出生年月', '电话', '籍贯'});
+                    app.UITable.Data = emptyData;
+                    app.TextArea.Value = '查询结果：0条记录';
+                    return;
+                end
+                
+                % 按行分割数据
+                lines = strsplit(msg, '\n');
+                
+                % 移除可能的空行
+                lines = lines(~cellfun(@isempty, strtrim(lines)));
+                
+                % 确定数据行数
+                numRows = length(lines);
+                
+                % 预分配单元格数组来存储数据
+                dataCells = cell(numRows, 4);
+                
+                % 解析每一行数据
+                for i = 1:numRows
+                    % 按逗号分割每行的数据
+                    rowData = strsplit(lines{i}, ',');
+                    
+                    % 存储到数据单元格
+                    dataCells(i, 1) = rowData(2);%姓名
+                    dataCells(i, 2) = rowData(5);%出生年月
+                    dataCells(i, 3) = rowData(3);%电话
+                    dataCells(i, 4) = rowData(4);%籍贯
+                end
+                
+                % 转换为表格
+                tableData = cell2table(dataCells, 'VariableNames', ...
+                    {'姓名', '出生年月', '电话', '籍贯'});
+                
+                % 更新UITable
+                app.UITable.Data = tableData;
+                
+                % 显示成功信息
+                app.TextArea.Value = sprintf('查询成功：%d条记录', numRows);
+                
+            catch e
+                % 显示错误信息
+                app.TextArea.Value = sprintf('数据解析错误: %s\n原始数据:\n%s', ...
+                    e.message, msg);
+                
+                % 清空表格
+                emptyData = cell2table(cell(0, 4), 'VariableNames', ...
+                    {'姓名', '出生年月', '电话', '籍贯'});
+                app.UITable.Data = emptyData;
+            end
+        end
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function TCPSever(app)
+            try
+                %app.tcpObj = tcpclient("125.39.174.103", 49422, "Timeout", 10);
+                app.tcpObj = tcpclient("127.0.0.1", 1642, "Timeout", 10);
+                fprintf("数据库连接成功\n");
+            catch e
+                fprintf("数据库连接失败 ：%s", e.message);
+            end
+            app.commTimer = timer( ...
+                'ExecutionMode', 'fixedSpacing', ...
+                'Period', 0.05, ...
+                'TimerFcn', @(~,~)app.tcpLoop());
+            start(app.commTimer);
+        end
+
+        % Callback function
+        function Search(app, event)
+            
+        end
+
+        % Close request function: UIFigure
+        function AppClose(app, event)
+            %清除定时器
+            try
+                if ~isempty(app.commTimer) && isvalid(app.commTimer)
+                    stop(app.commTimer);
+                    delete(app.commTimer);
+                    clear app.commTimer;
+                end
+            catch
+                % 忽略定时器已失效的情况
+            end
+        
+            if ~isempty(app.tcpObj)
+                clear app.tcpObj
+            end
+
+            %关闭TCP连接
+            clear tcpObj;
+            fprintf("数据库连接已关闭\n");
+            %关闭APP
+            delete(app)
+            
+        end
+
+        % Button pushed function: Button
+        function Select(app, event)
+            %如果查询条件为空
+            if isempty(app.EditField_5.Value)
+                headerLines = [
+                    "command=SELECTall", ...
+                    "name=", ...
+                    "birthday=", ...
+                    "phone=", ...
+                    "address=", ...
+                    "fileName=", ...
+                    "fileSize=0", ...
+                    "END_HEADER"
+                ];
+                
+                % 将头部每行加换行符
+                headerStr = strjoin(headerLines, sprintf('\r\n'));
+                headerBytes = unicode2native(headerStr, "UTF-8");
+                %更新SELECT标志位
+                app.SELECT_Mark = 2;
+
+            else
+                queryName = app.EditField_5.Value; % 只填姓名，其余为空
+                headerLines = [
+                    "command=SELECT", ...
+                    "name=" + string(queryName), ...
+                    "birthday=", ...
+                    "phone=", ...
+                    "address=", ...
+                    "fileName=", ...
+                    "fileSize=0", ...
+                    "END_HEADER"
+                ];
+
+                % 将头部每行加换行符
+                headerStr = strjoin(headerLines, sprintf('\r\n'));
+                headerBytes = unicode2native(headerStr, "UTF-8");
+
+                %更新SELECT标志位
+                app.SELECT_Mark = 1;
+            end
+
+            % 传输到发送队列
+            app.PendingCmd = headerBytes;
+
+            
+        end
+
+        % Button pushed function: Button_2
+        function INSERT(app, event)
+            % 判断姓名字段是否为空
+            if isempty(app.EditField.Value)
+                app.TextArea.Value = "录入失败，姓名不可为空";
+                if ~isempty(app.PendingCmd)
+                    app.TextArea.Value = "上一条指令还在发送，请稍候...";
+                    return;
+                end
+            else
+                % --- 构造头部 ---
+                headerLines = [
+                    "command=INSERT", ...
+                    "name=" + string(app.EditField.Value), ...
+                    "birthday=" + string(app.DatePicker.Value), ...
+                    "phone=" + string(app.EditField_3.Value), ...
+                    "address=" + string(app.EditField_4.Value), ...
+                    "fileName=" + string(app.PersonImageName), ...
+                    "fileSize=" + string(numel(app.PersonImageBytes)), ...
+                    "END_HEADER"
+                ];
+                
+                headerStr = strjoin(headerLines, sprintf('\r\n'));
+                headerBytes = unicode2native(headerStr, "UTF-8");
+                %headerBytes = uint8(char(headerStr));    % string -> char -> uint8
+                
+                % --- 图片处理 ---
+                imgBytes = uint8(app.PersonImageBytes(:));  % 展平并转 uint8
+                
+                % --- 拼接头部 + 图片 ---
+                headerBytes = headerBytes(:);  % 保证列向量
+                imgBytes    = imgBytes(:);     % 保证列向量
+                dataToSend = [headerBytes; imgBytes];  
+                
+                % --- 放入发送队列 ---
+                app.PendingCmd = dataToSend;
+            end
+        end
+
+        % Button pushed function: PDFButton
+        function printPDF(app, event)
+            import mlreportgen.report.*
+            import mlreportgen.dom.*
+        
+            rpt = Report('同乡通讯录', 'pdf');
+            append(rpt, TitlePage('Title', '同乡通讯录'));
+        
+            % 获取数据和表头
+            data = app.UITable.Data;
+            if istable(data)
+                tableData = [data.Properties.VariableNames; table2cell(data)];
+            else
+                tableData = data;
+            end
+        
+            % 创建DOM表格
+            domTable = Table(tableData);
+        
+            % === 设置表格整体宽度为A4可打印宽度 ===
+            domTable.Width = '17cm';  % A4宽21cm，减去默认页边距
+            domTable.TableEntriesHAlign = 'center'; 
+            domTable.ColSep = 'solid';
+            domTable.RowSep = 'solid';
+        
+            % 设置表格样式
+            domTable.Style = [domTable.Style {Border('solid', 'black', '1px')}];
+            domTable.TableEntriesStyle = [domTable.TableEntriesStyle {FontSize('10pt'), FontFamily('微软雅黑')}];
+        
+            % 设置表头加粗+背景色
+            for i = 1:size(tableData,2)
+                domTable.entry(1,i).Style = [domTable.entry(1,i).Style {Bold(true), BackgroundColor('#D9E1F2')}];
+            end
+        
+            append(rpt, domTable);
+            close(rpt);
+            rptview(rpt);
+            % 显示成功消息
+            app.TextArea.Value = "导出成功";
+        end
+
+        % Button pushed function: Button_3
+        function ImageUpdate(app, event)
+            [filename, pathname] = uigetfile( ...
+                {'*.jpg;*.jpeg;*.png;*.bmp;*.tif', '图像文件'}, ...
+                '选择头像');
+            
+            if filename ~= 0
+                fullpath = fullfile(pathname, filename);
+            
+                % 显示在 UIImage 组件
+                app.Image.ImageSource = fullpath;
+            
+                % 可选：保存原始文件字节，方便后续打包
+                fid = fopen(fullpath, 'rb');
+                app.PersonImageBytes = fread(fid, '*uint8');
+                fclose(fid);
+            
+                % 可选：保存文件名
+                app.PersonImageName = filename;
+            end
+        end
+
+        % Changes arrangement of the app based on UIFigure width
+        function updateAppLayout(app, event)
+            currentFigureWidth = app.UIFigure.Position(3);
+            if(currentFigureWidth <= app.onePanelWidth)
+                % Change to a 2x1 grid
+                app.GridLayout.RowHeight = {480, 480};
+                app.GridLayout.ColumnWidth = {'1x'};
+                app.RightPanel.Layout.Row = 2;
+                app.RightPanel.Layout.Column = 1;
+            else
+                % Change to a 1x2 grid
+                app.GridLayout.RowHeight = {'1x'};
+                app.GridLayout.ColumnWidth = {220, '1x'};
+                app.RightPanel.Layout.Row = 1;
+                app.RightPanel.Layout.Column = 2;
+            end
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.AutoResizeChildren = 'off';
+            app.UIFigure.Position = [100 100 640 480];
+            app.UIFigure.Name = 'MATLAB App';
+            app.UIFigure.CloseRequestFcn = createCallbackFcn(app, @AppClose, true);
+            app.UIFigure.SizeChangedFcn = createCallbackFcn(app, @updateAppLayout, true);
+
+            % Create GridLayout
+            app.GridLayout = uigridlayout(app.UIFigure);
+            app.GridLayout.ColumnWidth = {220, '1x'};
+            app.GridLayout.RowHeight = {'1x'};
+            app.GridLayout.ColumnSpacing = 0;
+            app.GridLayout.RowSpacing = 0;
+            app.GridLayout.Padding = [0 0 0 0];
+            app.GridLayout.Scrollable = 'on';
+
+            % Create LeftPanel
+            app.LeftPanel = uipanel(app.GridLayout);
+            app.LeftPanel.Layout.Row = 1;
+            app.LeftPanel.Layout.Column = 1;
+
+            % Create Label
+            app.Label = uilabel(app.LeftPanel);
+            app.Label.HorizontalAlignment = 'right';
+            app.Label.Position = [38 271 29 22];
+            app.Label.Text = '姓名';
+
+            % Create EditField
+            app.EditField = uieditfield(app.LeftPanel, 'text');
+            app.EditField.Position = [82 271 100 22];
+
+            % Create Label_3
+            app.Label_3 = uilabel(app.LeftPanel);
+            app.Label_3.HorizontalAlignment = 'right';
+            app.Label_3.Position = [38 178 29 22];
+            app.Label_3.Text = '电话';
+
+            % Create EditField_3
+            app.EditField_3 = uieditfield(app.LeftPanel, 'text');
+            app.EditField_3.CharacterLimits = [0 15];
+            app.EditField_3.InputType = 'digits';
+            app.EditField_3.Position = [82 178 100 22];
+
+            % Create Label_4
+            app.Label_4 = uilabel(app.LeftPanel);
+            app.Label_4.HorizontalAlignment = 'right';
+            app.Label_4.Position = [38 131 29 22];
+            app.Label_4.Text = '籍贯';
+
+            % Create EditField_4
+            app.EditField_4 = uieditfield(app.LeftPanel, 'text');
+            app.EditField_4.Position = [82 131 100 22];
+
+            % Create Label_5
+            app.Label_5 = uilabel(app.LeftPanel);
+            app.Label_5.HorizontalAlignment = 'right';
+            app.Label_5.Position = [15 226 53 22];
+            app.Label_5.Text = '出生年月';
+
+            % Create DatePicker
+            app.DatePicker = uidatepicker(app.LeftPanel);
+            app.DatePicker.DisplayFormat = 'uuuu-MM';
+            app.DatePicker.Position = [82 226 100 22];
+            app.DatePicker.Value = datetime([2000 1 1]);
+
+            % Create Button_2
+            app.Button_2 = uibutton(app.LeftPanel, 'push');
+            app.Button_2.ButtonPushedFcn = createCallbackFcn(app, @INSERT, true);
+            app.Button_2.Position = [66 68 100 22];
+            app.Button_2.Text = '录入';
+
+            % Create Image
+            app.Image = uiimage(app.LeftPanel);
+            app.Image.Position = [60 363 100 100];
+
+            % Create Button_3
+            app.Button_3 = uibutton(app.LeftPanel, 'push');
+            app.Button_3.ButtonPushedFcn = createCallbackFcn(app, @ImageUpdate, true);
+            app.Button_3.Position = [82 321 56 31];
+            app.Button_3.Text = '上传图片';
+
+            % Create RightPanel
+            app.RightPanel = uipanel(app.GridLayout);
+            app.RightPanel.Layout.Row = 1;
+            app.RightPanel.Layout.Column = 2;
+
+            % Create UITable
+            app.UITable = uitable(app.RightPanel);
+            app.UITable.ColumnName = {'姓名'; '出生年月'; '电话'; '籍贯'};
+            app.UITable.RowName = {};
+            app.UITable.Position = [51 130 347 254];
+
+            % Create Label_6
+            app.Label_6 = uilabel(app.RightPanel);
+            app.Label_6.HorizontalAlignment = 'right';
+            app.Label_6.Position = [53 55 53 22];
+            app.Label_6.Text = '执行结果';
+
+            % Create TextArea
+            app.TextArea = uitextarea(app.RightPanel);
+            app.TextArea.Position = [121 27 277 77];
+
+            % Create Button
+            app.Button = uibutton(app.RightPanel, 'push');
+            app.Button.ButtonPushedFcn = createCallbackFcn(app, @Select, true);
+            app.Button.Position = [210 426 100 22];
+            app.Button.Text = '查询';
+
+            % Create EditField_5Label
+            app.EditField_5Label = uilabel(app.RightPanel);
+            app.EditField_5Label.HorizontalAlignment = 'right';
+            app.EditField_5Label.Position = [22 425 29 22];
+            app.EditField_5Label.Text = '姓名';
+
+            % Create EditField_5
+            app.EditField_5 = uieditfield(app.RightPanel, 'text');
+            app.EditField_5.Position = [66 425 100 22];
+
+            % Create PDFButton
+            app.PDFButton = uibutton(app.RightPanel, 'push');
+            app.PDFButton.ButtonPushedFcn = createCallbackFcn(app, @printPDF, true);
+            app.PDFButton.Position = [321 426 74 22];
+            app.PDFButton.Text = '打印到PDF';
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = app1
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            % Execute the startup function
+            runStartupFcn(app, @TCPSever)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
