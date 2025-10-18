@@ -9,4 +9,5 @@ public interface DatabaseIO {
     public void insertQuery(String command); //执行插入语句
     public void deleteQuery(String command); //执行删除语句
     public void ImageQuery(String command); //执行图片插入语句
+    Connection getConnection(); //创建或者获取数据库连接
 }

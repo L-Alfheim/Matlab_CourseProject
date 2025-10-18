@@ -14,45 +14,46 @@ import java.util.Map;
 import java.sql.ResultSetMetaData;
 
 import com.Alfheim.Person.PersonPackageIO;
+import com.Alfheim.DatabaseInterface.DatabaseIO;
 import com.Alfheim.Person.PersonPackage;
 
 public class JavaServer {
     /**
-     * 主函数，启动服务器
+     * 主函数，启动服务器，并检测端口1642，创建线程处理客户端请求
      * @param args
      * @throws IOException
      */
     public static void main(String[] args) throws IOException {
         
         
-        PersonPackageIO person = new PersonPackage(); //人员信息打包对象
+        // PersonPackageIO person = new PersonPackage(); //人员信息打包对象
         // 启动服务器
         ServerSocket server = new ServerSocket(1642);
         System.out.println("Server started on port 1642...");
+        DatabaseIO create = new com.Alfheim.DatabaseInterface.SQLite(); //初始化数据库连接
+        create.getConnection();
         
-        // 保持服务器运行以支持多个客户端连接
+        // 检测客户端连接
         while (true) {
             Socket client = server.accept();
-            System.out.println("Client connected: " + client.getInetAddress());
+            System.out.println("Client connected: " + client.getInetAddress() + " port: " + client.getPort() + " Time:" + new java.util.Date().toString());
             
-            // 启动一个新线程处理客户端通信
-            new Thread(() -> handleClient(client, person)).start();
+            // 新线程处理客户端通信
+            new Thread(() -> handleClient(client)).start();
         }
     }
     
     // 处理客户端通信线程
     /**
-     * 前端发送格式：
-     * <header> <TEXTCommand> <"Name"> <
-     * @param client
-     * @param db
+     * @param client //客户端Socket
      */
-    private static void handleClient(Socket client, PersonPackageIO person) {
+    private static void handleClient(Socket client) {
         try (
-            DataInputStream in = new DataInputStream(client.getInputStream());
-            DataOutputStream out = new DataOutputStream(client.getOutputStream());
-        ) {
-            
+            DataInputStream in = new DataInputStream(client.getInputStream()); //输入流
+            DataOutputStream out = new DataOutputStream(client.getOutputStream()); //输出流
+            ) {
+            PersonPackageIO person = new PersonPackage();
+                
             while (true) {
                 // 1. ---- 读取header ----
                 Map<String, String> header = readHeader(in);
@@ -123,8 +124,9 @@ public class JavaServer {
 
     /**
      * 处理header部分
-     * @param in
-     * @return
+     * 读取并解析头数据包
+     * @param in //输入流
+     * @return Map<String, String> 头文件的字符串映射
      * @throws IOException
      */
     private static Map<String, String> readHeader(DataInputStream in) throws IOException {
@@ -132,7 +134,9 @@ public class JavaServer {
 
         // 1  用 ByteArrayOutputStream 收集 header 字节
         ByteArrayOutputStream headerBytes = new ByteArrayOutputStream();
-        int b;
+        int b; //单个字节
+
+        //使用b读取单个字节并写入headerBytes,直到结尾
         while ((b = in.read()) != -1) {
             headerBytes.write(b);
             // 临时转 UTF-8 判断是否接收到 END_HEADER
@@ -142,15 +146,15 @@ public class JavaServer {
             }
         }
 
-        // 2  如果没有读到 END_HEADER，说明客户端提前关闭
+        // 没有读到 END_HEADER，但是DataInputStream已到达end，客户端提前关闭，传输中断
         if (b == -1) {
             throw new IOException("Client closed connection before sending END_HEADER.");
         }
 
-        // 3  把 header 字节转为 UTF-8 字符串
+        // header 字节转为 UTF-8 字符串
         String headerStr = headerBytes.toString(StandardCharsets.UTF_8.name());
 
-        // 4  按行解析 header
+        // 按行解析 header
         for (String line : headerStr.split("\\r?\\n")) {
             line = line.trim();
             if (line.isEmpty() || "END_HEADER".equals(line)) continue;
@@ -165,9 +169,9 @@ public class JavaServer {
 
 
     /**
-     * 处理数据库命令的静态方法
-     * @param command
-     * @param person
+     * 处理数据库命令的静态方法，包括SELECTall, INSERT, DELETE
+     * @param command 指令
+     * @param person 操作的 PersonPackageIO 对象
      * @return 处理结果字符串
      */
     private static String processCommand(String command, PersonPackageIO person) {
@@ -212,10 +216,10 @@ public class JavaServer {
             }
 
         } catch (SQLException e) {
-            // 捕获 SQL 异常，返回详细信息
+            // SQL 异常
             return "SQL Error: " + e.getMessage();
         } catch (Exception e) {
-            // 捕获其他异常
+            // 其他异常
             return "Error processing command: " + e.getMessage();
         }
     }
@@ -228,7 +232,7 @@ public class JavaServer {
      * @throws IOException
      */
     public static void sendPersonPackage(OutputStream out, PersonPackageIO person, String command) throws IOException {
-        // --- 1) 构造头部 ---
+        // 构造HEADER
         Map<String, String> header = new LinkedHashMap<>();
         String result = person.getPersonFromDatabase();
         if ("Query returned no result.".equals(result)) {
@@ -246,6 +250,7 @@ public class JavaServer {
             }
             byte[] dataToSend = sb.toString().getBytes("UTF-8");
 
+            //写入并发送DataOutputStream
             out.write(dataToSend);
             out.flush();
             
@@ -258,10 +263,11 @@ public class JavaServer {
             header.put("birthday", person.getBirthday() != null ? person.getBirthday() : "");
             header.put("address", person.getAddress() != null ? person.getAddress() : "");
 
-            // --- 2) 处理图片 ---
+            // 写入图片的二进制数据
             byte[] imageBytes = new byte[0];
             String fileName = "";
             if (person.getImageURL() != null) {
+                //如果图片存在，读取图片
                 File imgFile = new File(person.getImageURL());
                 if (imgFile.exists() && imgFile.isFile()) {
                     imageBytes = Files.readAllBytes(imgFile.toPath());
@@ -270,9 +276,9 @@ public class JavaServer {
             }
             header.put("fileName", fileName);
             header.put("fileSize", String.valueOf(imageBytes.length));
-            header.put("END_HEADER", ""); // 占一行
+            header.put("END_HEADER", "");
 
-            // --- 3) 拼接头部 + 图片 ---
+            // 拼接HEADER + 图片
             StringBuilder sb = new StringBuilder();
             for (Map.Entry<String, String> entry : header.entrySet()) {
                 if ("END_HEADER".equals(entry.getKey())) {
@@ -288,7 +294,7 @@ public class JavaServer {
             baos.write(imageBytes);
             byte[] dataToSend = baos.toByteArray();
             
-            // --- 4) 发送 ---
+            // 写入DataOutStream 并发送
             out.write(dataToSend);
             out.flush();
             

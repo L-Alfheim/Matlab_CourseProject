@@ -18,13 +18,14 @@ public class PersonPackage implements PersonPackageIO {
     private String imageURL;  //面部信息的图片路径
     private byte[] image; //面部信息的图片字节数组，初次解包写入
 
-    DatabaseIO db = new SQLite();  //数据库连接对象
+    static DatabaseIO db = new SQLite();  //数据库连接对象
 
     //构造函数
     public PersonPackage() {
         try {
             // 连接数据库
-            db.connect();
+            // db.connect(); 已经废弃，改用下面的方法
+            db.getConnection();
         } catch (Exception e) {
             System.err.println("Database connection failed: " + e.getMessage());
         }
